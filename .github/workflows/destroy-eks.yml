@@ -1,0 +1,95 @@
+name: Destroy EKS environment
+
+# Reusable workflow: removes the Helm release (so its AWS load balancers are released)
+# and then destroys everything Terraform created, including the Vision One registration.
+
+on:
+  workflow_call:
+    inputs:
+      aws_region:
+        type: string
+        required: true
+      aws_role_arn:
+        type: string
+        required: true
+      tf_state_bucket:
+        type: string
+        required: true
+      cluster_name:
+        type: string
+        default: trend-lab-eks
+      pipeline_ref:
+        type: string
+        default: main
+      v1_regional_fqdn:
+        type: string
+        default: api.eu.xdr.trendmicro.com
+      helm_release:
+        type: string
+        default: ""
+      helm_namespace:
+        type: string
+        default: ""
+    secrets:
+      VISIONONE_API_KEY:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-eks-${{ inputs.cluster_name }}
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: pipeline/terraform
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: m1kl0s/trend-secure-pipeline
+          ref: ${{ inputs.pipeline_ref }}
+          path: pipeline
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: azure/setup-helm@v4
+
+      - name: Uninstall application release
+        if: inputs.helm_release != ''
+        run: |
+          if aws eks update-kubeconfig --name "${{ inputs.cluster_name }}" --region "${{ inputs.aws_region }}" 2>/dev/null; then
+            helm uninstall "${{ inputs.helm_release }}" -n "${{ inputs.helm_namespace }}" --wait --timeout 10m || true
+            kubectl delete namespace "${{ inputs.helm_namespace }}" --wait --timeout=10m || true
+          else
+            echo "cluster not reachable – nothing to uninstall"
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ">= 1.10"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ inputs.tf_state_bucket }}" \
+            -backend-config="key=${{ inputs.cluster_name }}/terraform.tfstate" \
+            -backend-config="region=${{ inputs.aws_region }}" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform destroy
+        env:
+          TF_VAR_aws_region: ${{ inputs.aws_region }}
+          TF_VAR_cluster_name: ${{ inputs.cluster_name }}
+          TF_VAR_visionone_api_key: ${{ secrets.VISIONONE_API_KEY }}
+          TF_VAR_visionone_regional_fqdn: ${{ inputs.v1_regional_fqdn }}
+        run: terraform destroy -input=false -auto-approve

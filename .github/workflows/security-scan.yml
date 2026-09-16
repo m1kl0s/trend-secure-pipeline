@@ -1,0 +1,218 @@
+name: Trend Vision One security scan
+
+# Reusable workflow. Call it from any repository:
+#
+#   jobs:
+#     scan:
+#       uses: m1kl0s/trend-secure-pipeline/.github/workflows/security-scan.yml@main
+#       with:
+#         v1_region: eu-central-1
+#       secrets:
+#         VISIONONE_API_KEY: ${{ secrets.VISIONONE_API_KEY }}
+#
+# Three independent scanners, each producing a report artifact and a job summary:
+#   file-security  – File Security (tmfs): malware + active-content scan of every tracked file
+#   code-security  – Code Security (tmas): open-source vulnerabilities + secrets in the source tree
+#   image-security – Container images (tmas): vulnerabilities + malware + secrets in docker-archive tars
+
+on:
+  workflow_call:
+    inputs:
+      v1_region:
+        description: Vision One region of the API key (eu-central-1, us-east-1, ...)
+        type: string
+        default: eu-central-1
+      file_security:
+        description: Run the File Security (malware) scan over the repository
+        type: boolean
+        default: true
+      code_security:
+        description: Run the Code Security (vulnerabilities + secrets) scan over source_path
+        type: boolean
+        default: true
+      source_path:
+        description: Directory to scan for Code Security, relative to the repository root
+        type: string
+        default: "."
+      image_artifacts:
+        description: >-
+          JSON list of docker-archive tarballs uploaded as workflow artifacts, e.g.
+          [{"artifact":"docker-image-app","file":"app.tar"}]. "[]" disables the image scan.
+        type: string
+        default: "[]"
+      evaluate_policy:
+        description: Evaluate results against the Vision One Code Security policy (exit code 2 on violation)
+        type: boolean
+        default: false
+      fail_on_malware:
+        description: Fail the workflow when File Security or the image scan finds malware
+        type: boolean
+        default: true
+    secrets:
+      VISIONONE_API_KEY:
+        description: Vision One API key with "Run file scan via SDK" and artifact-scan permissions
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  file-security:
+    name: File Security (malware)
+    if: inputs.file_security
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: m1kl0s/trend-secure-pipeline/.github/actions/install-tmfs@main
+
+      # tmfs "dir:" targets are not recursive, so the whole tracked tree is archived
+      # and scanned as one artifact; tmfs unpacks archives and reports inner files.
+      - name: Archive tracked files
+        run: git archive --format=tar.gz --output "$RUNNER_TEMP/repo.tar.gz" HEAD
+
+      - name: Scan with File Security
+        id: scan
+        env:
+          TMFS_API_KEY: ${{ secrets.VISIONONE_API_KEY }}
+          V1_REGION: ${{ inputs.v1_region }}
+        run: |
+          set -euo pipefail
+          tmfs scan --region "$V1_REGION" "file:$RUNNER_TEMP/repo.tar.gz" \
+            --pml=true --activeContent=true --timeoutInSecs 900 \
+            --tag "repo=${GITHUB_REPOSITORY#*/}" --tag "sha=${GITHUB_SHA::12}" --tag "stage=ci" \
+            > file-security.json
+          MALWARE=$(jq -r '.scanResult // .totalMalwareCount // 0' file-security.json)
+          echo "malware_count=$MALWARE" >> "$GITHUB_OUTPUT"
+          {
+            echo "## File Security – ${GITHUB_REPOSITORY} @ ${GITHUB_SHA::12}"
+            echo
+            echo "| Files archived | Malware found |"
+            echo "|---|---|"
+            echo "| $(git ls-files | wc -l | tr -d ' ') | **$MALWARE** |"
+            if [ "$MALWARE" != "0" ]; then
+              echo
+              echo "| File | Malware |"
+              echo "|---|---|"
+              jq -r '.foundMalwares[]? | "| \(.fileName) | \(.malwareName) |"' file-security.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: file-security-report
+          path: file-security.json
+
+      - name: Enforce
+        if: inputs.fail_on_malware && steps.scan.outputs.malware_count != '0'
+        run: |
+          echo "::error::File Security found ${{ steps.scan.outputs.malware_count }} malicious file(s)"
+          exit 1
+
+  code-security:
+    name: Code Security (vulnerabilities + secrets)
+    if: inputs.code_security
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: m1kl0s/trend-secure-pipeline/.github/actions/install-tmas@main
+
+      - name: Scan with TMAS
+        id: scan
+        env:
+          TMAS_API_KEY: ${{ secrets.VISIONONE_API_KEY }}
+          V1_REGION: ${{ inputs.v1_region }}
+          SOURCE_PATH: ${{ inputs.source_path }}
+          EVALUATE_POLICY: ${{ inputs.evaluate_policy }}
+        run: |
+          set -uo pipefail
+          ARGS=(scan "dir:${SOURCE_PATH}" -V -S --redacted -r "$V1_REGION"
+                --output "json=code-security.json,markdown=code-security.md")
+          [ "$EVALUATE_POLICY" = "true" ] && ARGS+=(--evaluatePolicy)
+          tmas "${ARGS[@]}" > /dev/null
+          RC=$?
+          echo "exit_code=$RC" >> "$GITHUB_OUTPUT"
+          if [ -f code-security.md ]; then
+            { echo "## Code Security – ${GITHUB_REPOSITORY} @ ${GITHUB_SHA::12}"; echo; cat code-security.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f code-security.json ]; then
+            jq -r '"critical=\(.vulnerabilities.criticalCount // 0)",
+                   "high=\(.vulnerabilities.highCount // 0)",
+                   "secrets=\(.secrets.unmitigatedFindingsCount // 0)"' code-security.json >> "$GITHUB_OUTPUT"
+          fi
+          # 0 = ok, 2 = policy violation (only with --evaluatePolicy); anything else is a scanner error
+          [ "$RC" -eq 0 ] || [ "$RC" -eq 2 ] || exit "$RC"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: code-security-report
+          path: |
+            code-security.json
+            code-security.md
+
+      - name: Enforce Code Security policy
+        if: inputs.evaluate_policy && steps.scan.outputs.exit_code == '2'
+        run: |
+          echo "::error::Code Security policy violated (critical=${{ steps.scan.outputs.critical }} high=${{ steps.scan.outputs.high }} secrets=${{ steps.scan.outputs.secrets }})"
+          exit 1
+
+  image-security:
+    name: Image scan (${{ matrix.artifact }})
+    if: inputs.image_artifacts != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.image_artifacts) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/image
+
+      - uses: m1kl0s/trend-secure-pipeline/.github/actions/install-tmas@main
+
+      - name: Scan image with TMAS (vulnerabilities, malware, secrets)
+        id: scan
+        env:
+          TMAS_API_KEY: ${{ secrets.VISIONONE_API_KEY }}
+          V1_REGION: ${{ inputs.v1_region }}
+          IMAGE_TAR: ${{ runner.temp }}/image/${{ matrix.file }}
+          EVALUATE_POLICY: ${{ inputs.evaluate_policy }}
+        run: |
+          set -uo pipefail
+          ARGS=(scan "docker-archive:${IMAGE_TAR}" -V -M -S --redacted -r "$V1_REGION"
+                --output "json=image-security.json,markdown=image-security.md")
+          [ "$EVALUATE_POLICY" = "true" ] && ARGS+=(--evaluatePolicy)
+          tmas "${ARGS[@]}" > /dev/null
+          RC=$?
+          echo "exit_code=$RC" >> "$GITHUB_OUTPUT"
+          if [ -f image-security.md ]; then
+            { echo "## Image scan – ${{ matrix.artifact }}"; echo; cat image-security.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f image-security.json ]; then
+            echo "malware_count=$(jq -r '[.. | objects | select(has("malwareName"))] | length' image-security.json)" >> "$GITHUB_OUTPUT"
+          fi
+          [ "$RC" -eq 0 ] || [ "$RC" -eq 2 ] || exit "$RC"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: image-security-report-${{ matrix.artifact }}
+          path: |
+            image-security.json
+            image-security.md
+
+      - name: Enforce
+        if: >-
+          (inputs.fail_on_malware && steps.scan.outputs.malware_count != '0' && steps.scan.outputs.malware_count != '')
+          || (inputs.evaluate_policy && steps.scan.outputs.exit_code == '2')
+        run: |
+          echo "::error::Image ${{ matrix.artifact }} failed security gate (malware=${{ steps.scan.outputs.malware_count }} policy_exit=${{ steps.scan.outputs.exit_code }})"
+          exit 1

@@ -1,0 +1,21 @@
+name: Install TMAS CLI
+description: Download the TrendAI Artifact Scanner (TMAS) CLI from Trend Micro's official CDN and add it to PATH.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64)        ARCH=x86_64 ;;
+          aarch64|arm64) ARCH=arm64 ;;
+          *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+        esac
+        DEST="$RUNNER_TEMP/tmas"
+        mkdir -p "$DEST"
+        curl -fsSL "https://ast-cli.xdr.trendmicro.com/tmas-cli/latest/tmas-cli_Linux_${ARCH}.tar.gz" \
+          | tar -xz -C "$DEST"
+        chmod +x "$DEST/tmas"
+        echo "$DEST" >> "$GITHUB_PATH"
+        echo "tmas $("$DEST/tmas" --version)"

@@ -1,0 +1,21 @@
+name: Install File Security CLI
+description: Download the TrendAI Vision One File Security CLI (tmfs) from Trend Micro's official CDN and add it to PATH.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64)        ARCH=x86_64 ;;
+          aarch64|arm64) ARCH=arm64 ;;
+          *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+        esac
+        DEST="$RUNNER_TEMP/tmfs"
+        mkdir -p "$DEST"
+        curl -fsSL "https://tmfs-cli.fs-sdk-ue1.xdr.trendmicro.com/tmfs-cli/latest/tmfs-cli_Linux_${ARCH}.tar.gz" \
+          | tar -xz -C "$DEST"
+        chmod +x "$DEST/tmfs"
+        echo "$DEST" >> "$GITHUB_PATH"
+        "$DEST/tmfs" version

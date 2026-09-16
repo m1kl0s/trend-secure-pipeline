@@ -1,0 +1,26 @@
+# Drop this file into any repository as .github/workflows/trend-security-scan.yml
+# and add the repository secret VISIONONE_API_KEY. That is the whole onboarding.
+
+name: Trend Vision One security scan
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    uses: m1kl0s/trend-secure-pipeline/.github/workflows/security-scan.yml@main
+    with:
+      v1_region: ${{ vars.V1_REGION || 'eu-central-1' }}
+      file_security: true
+      code_security: true
+      source_path: "."
+      # Set to true once you want the Vision One Code Security policy to gate merges
+      evaluate_policy: false
+    secrets:
+      VISIONONE_API_KEY: ${{ secrets.VISIONONE_API_KEY }}

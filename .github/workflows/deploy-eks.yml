@@ -1,0 +1,287 @@
+name: Deploy to EKS protected by Vision One
+
+# Reusable workflow: provisions (or updates) an EKS cluster registered with Vision One
+# Container Security, publishes scanned images to ECR, then deploys the application
+# with Helm. AWS access uses GitHub OIDC (no long-lived keys).
+
+on:
+  workflow_call:
+    inputs:
+      aws_region:
+        type: string
+        required: true
+      aws_role_arn:
+        description: IAM role assumed via GitHub OIDC (created by bootstrap/github-oidc-bootstrap.yaml)
+        type: string
+        required: true
+      tf_state_bucket:
+        description: S3 bucket for Terraform state (created by the bootstrap stack)
+        type: string
+        required: true
+      cluster_name:
+        type: string
+        default: trend-lab-eks
+      pipeline_ref:
+        description: Git ref of m1kl0s/trend-secure-pipeline to take the Terraform from
+        type: string
+        default: main
+      v1_regional_fqdn:
+        description: Vision One regional API FQDN (api.eu.xdr.trendmicro.com, api.xdr.trendmicro.com, ...)
+        type: string
+        default: api.eu.xdr.trendmicro.com
+      ecr_repositories:
+        description: JSON list of ECR repository names to create
+        type: string
+        default: '["opencti-platform","opencti-worker"]'
+      images:
+        description: >-
+          JSON list of images to publish, e.g.
+          [{"artifact":"docker-image-app","file":"app.tar","repository":"app"}]
+        type: string
+        default: "[]"
+      image_tag:
+        type: string
+        default: ${{ github.sha }}
+      helm_release:
+        type: string
+        required: true
+      helm_namespace:
+        type: string
+        required: true
+      helm_chart:
+        description: Chart reference (oci://... or repo/chart)
+        type: string
+        required: true
+      helm_chart_version:
+        type: string
+        default: ""
+      helm_values_file:
+        description: Values file path in the calling repository
+        type: string
+        default: ""
+      image_values:
+        description: >-
+          JSON list mapping Helm image value keys to ECR repositories, e.g.
+          [{"key":"image","repository":"app"}] sets key.repository and key.tag
+        type: string
+        default: "[]"
+      generated_secret:
+        description: >-
+          Kubernetes secret to generate in helm_namespace on first deploy (kept on later runs), e.g.
+          {"name":"app-credentials","keys":{"ADMIN_PASSWORD":"password:24","TOKEN":"uuid","KEY":"base64:32"}}.
+          Generators: password:<len>, uuid, base64:<bytes>, hex:<bytes>. "{}" disables.
+        type: string
+        default: "{}"
+    secrets:
+      VISIONONE_API_KEY:
+        required: true
+    outputs:
+      cluster_name:
+        value: ${{ jobs.infra.outputs.cluster_name }}
+      ecr_registry:
+        value: ${{ jobs.infra.outputs.ecr_registry }}
+      app_url:
+        value: ${{ jobs.deploy-app.outputs.app_url }}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-eks-${{ inputs.cluster_name }}
+  cancel-in-progress: false
+
+jobs:
+  infra:
+    name: Terraform – EKS + ECR + Vision One
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      cluster_name: ${{ steps.out.outputs.cluster_name }}
+      ecr_registry: ${{ steps.out.outputs.ecr_registry }}
+    defaults:
+      run:
+        working-directory: pipeline/terraform
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: m1kl0s/trend-secure-pipeline
+          ref: ${{ inputs.pipeline_ref }}
+          path: pipeline
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ">= 1.10"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ inputs.tf_state_bucket }}" \
+            -backend-config="key=${{ inputs.cluster_name }}/terraform.tfstate" \
+            -backend-config="region=${{ inputs.aws_region }}" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform apply
+        env:
+          TF_VAR_aws_region: ${{ inputs.aws_region }}
+          TF_VAR_cluster_name: ${{ inputs.cluster_name }}
+          TF_VAR_ecr_repositories: ${{ inputs.ecr_repositories }}
+          TF_VAR_visionone_api_key: ${{ secrets.VISIONONE_API_KEY }}
+          TF_VAR_visionone_regional_fqdn: ${{ inputs.v1_regional_fqdn }}
+        run: terraform apply -input=false -auto-approve
+
+      - name: Collect outputs
+        id: out
+        run: |
+          echo "cluster_name=$(terraform output -raw cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "ecr_registry=$(terraform output -raw ecr_registry)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Infrastructure"
+            echo
+            echo '```'
+            terraform output
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-images:
+    name: Publish ${{ matrix.repository }} to ECR
+    if: inputs.images != '[]'
+    needs: infra
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.images) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/image
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Load, tag and push
+        env:
+          IMAGE_TAR: ${{ runner.temp }}/image/${{ matrix.file }}
+          TARGET: ${{ needs.infra.outputs.ecr_registry }}/${{ matrix.repository }}:${{ inputs.image_tag }}
+          REPOSITORY: ${{ matrix.repository }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if aws ecr describe-images --repository-name "$REPOSITORY" --image-ids "imageTag=$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "$TARGET already exists (immutable tags) – skipping push"
+            exit 0
+          fi
+          LOADED=$(docker load -i "$IMAGE_TAR" | sed -n 's/^Loaded image: //p' | head -n1)
+          test -n "$LOADED"
+          docker tag "$LOADED" "$TARGET"
+          docker push "$TARGET"
+          echo "- pushed \`$TARGET\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-app:
+    name: Helm deploy ${{ inputs.helm_release }}
+    needs: [infra, publish-images]
+    if: always() && needs.infra.result == 'success' && (needs.publish-images.result == 'success' || needs.publish-images.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      app_url: ${{ steps.url.outputs.app_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: azure/setup-helm@v4
+
+      - name: Kubeconfig
+        run: aws eks update-kubeconfig --name "${{ needs.infra.outputs.cluster_name }}" --region "${{ inputs.aws_region }}"
+
+      - name: Ensure application secret
+        if: inputs.generated_secret != '{}'
+        env:
+          SPEC: ${{ inputs.generated_secret }}
+          NS: ${{ inputs.helm_namespace }}
+        run: |
+          set -euo pipefail
+          NAME=$(jq -r '.name' <<< "$SPEC")
+          kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
+          if kubectl get secret "$NAME" -n "$NS" >/dev/null 2>&1; then
+            echo "secret $NAME already exists in $NS – keeping it"
+            exit 0
+          fi
+          ARGS=()
+          while IFS=$'\t' read -r key gen; do
+            case "$gen" in
+              uuid)       val=$(cat /proc/sys/kernel/random/uuid) ;;
+              password:*) val=$(openssl rand -base64 96 | tr -dc 'A-Za-z0-9' | cut -c1-"${gen#password:}") ;;
+              base64:*)   val=$(openssl rand -base64 "${gen#base64:}") ;;
+              hex:*)      val=$(openssl rand -hex "${gen#hex:}") ;;
+              *) echo "::error::unknown generator '$gen' for key $key"; exit 1 ;;
+            esac
+            ARGS+=(--from-literal="${key}=${val}")
+          done < <(jq -r '.keys | to_entries[] | [.key, .value] | @tsv' <<< "$SPEC")
+          kubectl create secret generic "$NAME" -n "$NS" "${ARGS[@]}"
+          echo "created secret $NAME with keys: $(jq -r '.keys | keys | join(", ")' <<< "$SPEC")"
+
+      - name: Helm upgrade --install
+        env:
+          REGISTRY: ${{ needs.infra.outputs.ecr_registry }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_VALUES: ${{ inputs.image_values }}
+          VALUES_FILE: ${{ inputs.helm_values_file }}
+          CHART_VERSION: ${{ inputs.helm_chart_version }}
+        run: |
+          set -euo pipefail
+          SET_ARGS=()
+          while IFS=$'\t' read -r key repo; do
+            SET_ARGS+=(--set "${key}.repository=${REGISTRY}/${repo}" --set "${key}.tag=${IMAGE_TAG}")
+          done < <(jq -r '.[] | [.key, .repository] | @tsv' <<< "$IMAGE_VALUES")
+          [ -n "$VALUES_FILE" ] && SET_ARGS+=(-f "$VALUES_FILE")
+          [ -n "$CHART_VERSION" ] && SET_ARGS+=(--version "$CHART_VERSION")
+          helm upgrade --install "${{ inputs.helm_release }}" "${{ inputs.helm_chart }}" \
+            --namespace "${{ inputs.helm_namespace }}" --create-namespace \
+            "${SET_ARGS[@]}" --wait --timeout 25m
+
+      - name: Application endpoint
+        id: url
+        env:
+          SPEC: ${{ inputs.generated_secret }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            HOST=$(kubectl get svc -n "${{ inputs.helm_namespace }}" -l "app.kubernetes.io/instance=${{ inputs.helm_release }}" \
+                    -o jsonpath='{.items[?(@.spec.type=="LoadBalancer")].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [ -n "$HOST" ] && break
+            sleep 10
+          done
+          URL="http://${HOST:-<pending>}"
+          echo "app_url=$URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Application"
+            echo
+            echo "- Release: \`${{ inputs.helm_release }}\` in namespace \`${{ inputs.helm_namespace }}\`"
+            echo "- URL: $URL"
+            if [ "$SPEC" != "{}" ]; then
+              SECRET=$(jq -r '.name' <<< "$SPEC")
+              echo "- Credentials: \`kubectl get secret $SECRET -n ${{ inputs.helm_namespace }} -o jsonpath='{.data}'\` (base64-encoded)"
+            fi
+            echo
+            echo '```'
+            kubectl get pods -n "${{ inputs.helm_namespace }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

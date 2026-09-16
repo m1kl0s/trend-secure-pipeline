@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  One-time bootstrap for trend-secure-pipeline: GitHub Actions OIDC identity provider,
+  a deployment role GitHub can assume without long-lived keys, and a versioned S3
+  bucket for Terraform state.
+
+Parameters:
+  GitHubSubjectPatterns:
+    Type: CommaDelimitedList
+    Default: "repo:m1kl0s/*:*"
+    Description: >-
+      OIDC subject patterns allowed to assume the role. Narrow to specific repositories
+      and branches for production, e.g. repo:m1kl0s/opencti:ref:refs/heads/master
+  RoleName:
+    Type: String
+    Default: trend-secure-pipeline-deploy
+  DeploymentPolicyArn:
+    Type: String
+    Default: arn:aws:iam::aws:policy/AdministratorAccess
+    Description: Managed policy granted to the deployment role (lab default; scope down for production)
+  StateBucketName:
+    Type: String
+    Default: ""
+    Description: Leave empty to generate trend-secure-tfstate-<account>-<region>
+
+Conditions:
+  GenerateBucketName: !Equals [!Ref StateBucketName, ""]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      MaxSessionDuration: 7200
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !GetAtt GitHubOidcProvider.Arn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Ref GitHubSubjectPatterns
+      ManagedPolicyArns:
+        - !Ref DeploymentPolicyArn
+
+  StateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !If
+        - GenerateBucketName
+        - !Sub "trend-secure-tfstate-${AWS::AccountId}-${AWS::Region}"
+        - !Ref StateBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  RoleArn:
+    Description: Set as GitHub repository variable AWS_ROLE_ARN
+    Value: !GetAtt DeployRole.Arn
+  StateBucket:
+    Description: Set as GitHub repository variable TF_STATE_BUCKET
+    Value: !Ref StateBucket
+  Region:
+    Description: Set as GitHub repository variable AWS_REGION
+    Value: !Ref AWS::Region
