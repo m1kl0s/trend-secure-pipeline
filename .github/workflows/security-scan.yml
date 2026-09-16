@@ -67,6 +67,22 @@ jobs:
 
       - uses: m1kl0s/trend-secure-pipeline/.github/actions/install-tmfs@main
 
+      # A "clean" verdict is only meaningful if the engine is live and reaches files
+      # inside archives, so prove that first with the standard EICAR test file.
+      - name: File Security self-test (EICAR canary)
+        env:
+          TMFS_API_KEY: ${{ secrets.VISIONONE_API_KEY }}
+          V1_REGION: ${{ inputs.v1_region }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/canary/nested"
+          printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > "$RUNNER_TEMP/canary/nested/eicar.com"
+          tar -czf "$RUNNER_TEMP/canary.tar.gz" -C "$RUNNER_TEMP" canary
+          FOUND=$(tmfs scan --region "$V1_REGION" "file:$RUNNER_TEMP/canary.tar.gz" --tag "stage=canary" | jq -r '.scanResult')
+          rm -rf "$RUNNER_TEMP/canary" "$RUNNER_TEMP/canary.tar.gz"
+          [ "$FOUND" = "1" ] || { echo "::error::File Security canary not detected (scanResult=$FOUND); refusing to trust a clean result"; exit 1; }
+          echo "canary detected inside archive - File Security engine is live"
+
       # tmfs "dir:" targets are not recursive, so the whole tracked tree is archived
       # and scanned as one artifact; tmfs unpacks archives and reports inner files.
       - name: Archive tracked files
