@@ -50,7 +50,7 @@ jobs:
       run:
         working-directory: pipeline/terraform
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: m1kl0s/trend-secure-pipeline
           ref: ${{ inputs.pipeline_ref }}

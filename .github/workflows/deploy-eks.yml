@@ -103,7 +103,7 @@ jobs:
       run:
         working-directory: pipeline/terraform
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: m1kl0s/trend-secure-pipeline
           ref: ${{ inputs.pipeline_ref }}
@@ -160,7 +160,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(inputs.images) }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
           path: ${{ runner.temp }}/image
@@ -199,7 +199,7 @@ jobs:
     outputs:
       app_url: ${{ steps.url.outputs.app_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:

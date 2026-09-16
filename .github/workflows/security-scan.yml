@@ -63,7 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: m1kl0s/trend-secure-pipeline/.github/actions/install-tmfs@main
 
@@ -99,7 +99,7 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: file-security-report
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: m1kl0s/trend-secure-pipeline/.github/actions/install-tmas@main
 
@@ -147,7 +147,7 @@ jobs:
           # 0 = ok, 2 = policy violation (only with --evaluatePolicy); anything else is a scanner error
           [ "$RC" -eq 0 ] || [ "$RC" -eq 2 ] || exit "$RC"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: code-security-report
@@ -171,7 +171,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(inputs.image_artifacts) }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
           path: ${{ runner.temp }}/image
@@ -201,7 +201,7 @@ jobs:
           fi
           [ "$RC" -eq 0 ] || [ "$RC" -eq 2 ] || exit "$RC"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: image-security-report-${{ matrix.artifact }}
