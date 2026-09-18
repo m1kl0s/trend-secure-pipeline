@@ -43,7 +43,7 @@ Repository → Settings → Secrets and variables → Actions:
 |---|---|---|
 | Secret | `VISIONONE_API_KEY` | the key from step 2 |
 | Variable | `V1_REGION` | `eu-central-1` (Vision One region of the key) |
-| Variable | `V1_REGIONAL_FQDN` | `api.eu.xdr.trendmicro.com` |
+| Variable | `V1_REGIONAL_FQDN` | `https://api.eu.xdr.trendmicro.com` |
 | Variable | `AWS_REGION` | e.g. `eu-north-1` |
 | Variable | `AWS_ROLE_ARN` | `RoleArn` stack output |
 | Variable | `TF_STATE_BUCKET` | `StateBucket` stack output |

@@ -26,9 +26,9 @@ on:
         type: string
         default: main
       v1_regional_fqdn:
-        description: Vision One regional API FQDN (api.eu.xdr.trendmicro.com, api.xdr.trendmicro.com, ...)
+        description: Vision One regional API FQDN (https://api.eu.xdr.trendmicro.com, https://api.xdr.trendmicro.com, ...)
         type: string
-        default: api.eu.xdr.trendmicro.com
+        default: https://api.eu.xdr.trendmicro.com
       ecr_repositories:
         description: JSON list of ECR repository names to create
         type: string

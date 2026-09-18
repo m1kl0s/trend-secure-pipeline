@@ -23,7 +23,7 @@ on:
         default: main
       v1_regional_fqdn:
         type: string
-        default: api.eu.xdr.trendmicro.com
+        default: https://api.eu.xdr.trendmicro.com
       helm_release:
         type: string
         default: ""

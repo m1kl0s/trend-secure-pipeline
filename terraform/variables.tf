@@ -35,7 +35,7 @@ variable "visionone_api_key" {
 
 variable "visionone_regional_fqdn" {
   type    = string
-  default = "api.eu.xdr.trendmicro.com"
+  default = "https://api.eu.xdr.trendmicro.com"
 }
 
 variable "visionone_group_id" {
