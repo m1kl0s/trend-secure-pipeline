@@ -22,13 +22,21 @@ Parameters:
     Type: String
     Default: ""
     Description: Leave empty to generate trend-secure-tfstate-<account>-<region>
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ARN of an existing GitHub OIDC provider (arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com).
+      An account can hold only one; leave empty to create it.
 
 Conditions:
   GenerateBucketName: !Equals [!Ref StateBucketName, ""]
+  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, ""]
 
 Resources:
   GitHubOidcProvider:
     Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
     Properties:
       Url: https://token.actions.githubusercontent.com
       ClientIdList:
@@ -47,7 +55,10 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !GetAtt GitHubOidcProvider.Arn
+              Federated: !If
+                - CreateOidcProvider
+                - !GetAtt GitHubOidcProvider.Arn
+                - !Ref ExistingOidcProviderArn
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:
