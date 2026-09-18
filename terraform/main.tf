@@ -65,6 +65,7 @@ module "eks" {
   kubernetes_version = var.kubernetes_version
 
   endpoint_public_access                   = true
+  endpoint_public_access_cidrs             = var.cluster_endpoint_public_access_cidrs
   enable_cluster_creator_admin_permissions = true
 
   vpc_id     = module.vpc.vpc_id

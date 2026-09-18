@@ -23,6 +23,12 @@ variable "node_count" {
   default = 2
 }
 
+variable "cluster_endpoint_public_access_cidrs" {
+  description = "CIDRs allowed to reach the Kubernetes API endpoint (IAM auth still required)"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
 variable "ecr_repositories" {
   type    = list(string)
   default = ["opencti-platform", "opencti-worker"]
