@@ -98,6 +98,28 @@ module "eks" {
   tags = local.tags
 }
 
+# EKS no longer ships a default StorageClass; without one, every PVC stays Pending.
+resource "kubernetes_storage_class_v1" "gp3_default" {
+  metadata {
+    name = "gp3"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" = "true"
+    }
+  }
+
+  storage_provisioner    = "ebs.csi.aws.com"
+  volume_binding_mode    = "WaitForFirstConsumer"
+  reclaim_policy         = "Delete"
+  allow_volume_expansion = true
+
+  parameters = {
+    type      = "gp3"
+    encrypted = "true"
+  }
+
+  depends_on = [module.eks]
+}
+
 resource "aws_ecr_repository" "this" {
   for_each = toset(var.ecr_repositories)
 
