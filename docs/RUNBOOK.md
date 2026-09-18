@@ -6,18 +6,10 @@ Everything the pipeline cannot do for you, as copy-paste commands. Region: `eu-n
 
 Open AWS CloudShell in `eu-north-1`.
 
+One command; the last two lines it prints are `RoleArn` and `StateBucket`:
+
 ```bash
-aws sts get-caller-identity
-git clone https://github.com/m1kl0s/trend-secure-pipeline.git
-cd trend-secure-pipeline
-aws cloudformation deploy \
-  --region eu-north-1 \
-  --stack-name trend-secure-bootstrap \
-  --template-file bootstrap/github-oidc-bootstrap.yaml \
-  --capabilities CAPABILITY_NAMED_IAM
-aws cloudformation describe-stacks --region eu-north-1 \
-  --stack-name trend-secure-bootstrap \
-  --query "Stacks[0].Outputs" --output table
+aws sts get-caller-identity && git clone -q https://github.com/m1kl0s/trend-secure-pipeline.git && aws cloudformation deploy --region eu-north-1 --stack-name trend-secure-bootstrap --template-file trend-secure-pipeline/bootstrap/github-oidc-bootstrap.yaml --capabilities CAPABILITY_NAMED_IAM && aws cloudformation describe-stacks --region eu-north-1 --stack-name trend-secure-bootstrap --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" --output text
 ```
 
 If the deploy fails with `Provider with url https://token.actions.githubusercontent.com already exists`, the account already has a GitHub OIDC provider; report it and the template will be switched to reuse it.
@@ -41,23 +33,10 @@ Timeline: scans + image build ≈ 15 min, Terraform (VPC, EKS, ECR, Vision One r
 
 ## 4. Verify the cluster — CloudShell
 
+One command: installs kubectl, grants your CloudShell identity cluster-admin (Terraform only grants the GitHub role), then prints nodes, Vision One agent pods, OpenCTI pods, the service (EXTERNAL-IP = OpenCTI URL, http port 80) and the admin password:
+
 ```bash
-# kubectl is not preinstalled in CloudShell
-curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-chmod +x kubectl && sudo mv kubectl /usr/local/bin/
-
-# Grant your CloudShell identity admin access to the cluster (Terraform only grants the GitHub role)
-PRINCIPAL=$(aws sts get-caller-identity --query Arn --output text | sed -E 's#:assumed-role/([^/]+)/.*#:role/\1#; s#:sts:#:iam:#')
-aws eks create-access-entry --region eu-north-1 --cluster-name trend-lab-eks --principal-arn "$PRINCIPAL"
-aws eks associate-access-policy --region eu-north-1 --cluster-name trend-lab-eks --principal-arn "$PRINCIPAL" \
-  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster
-
-aws eks update-kubeconfig --region eu-north-1 --name trend-lab-eks
-kubectl get nodes
-kubectl get pods -n trendmicro-system          # Vision One agents: admission controller, scanner, runtime sensor
-kubectl get pods -n opencti                     # opencti, worker, opensearch, rabbitmq, redis, rustfs
-kubectl get svc -n opencti opencti              # EXTERNAL-IP = OpenCTI URL (http, port 80)
-kubectl get secret opencti-credentials -n opencti -o jsonpath='{.data.APP__ADMIN__PASSWORD}' | base64 -d; echo
+curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && chmod +x kubectl && sudo mv kubectl /usr/local/bin/ && PRINCIPAL=$(aws sts get-caller-identity --query Arn --output text | sed -E 's#:assumed-role/([^/]+)/.*#:role/\1#; s#:sts:#:iam:#') && (aws eks create-access-entry --region eu-north-1 --cluster-name trend-lab-eks --principal-arn "$PRINCIPAL" 2>/dev/null || true) && aws eks associate-access-policy --region eu-north-1 --cluster-name trend-lab-eks --principal-arn "$PRINCIPAL" --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster >/dev/null && aws eks update-kubeconfig --region eu-north-1 --name trend-lab-eks && kubectl get nodes && kubectl get pods -n trendmicro-system && kubectl get pods -n opencti && kubectl get svc -n opencti opencti && echo "ADMIN PASSWORD: $(kubectl get secret opencti-credentials -n opencti -o jsonpath='{.data.APP__ADMIN__PASSWORD}' | base64 -d)"
 ```
 
 Login: `admin@opencti.local` + that password.
@@ -69,17 +48,15 @@ Console: **Cloud Security → Container Security → Inventory → Amazon EKS** 
 API check (paste your key into the shell yourself; it is not stored anywhere):
 
 ```bash
-read -rs V1_KEY; export V1_KEY
-curl -s -H "Authorization: Bearer $V1_KEY" \
-  https://api.eu.xdr.trendmicro.com/v3.0/containerSecurity/kubernetesClusters | python3 -m json.tool
+read -rsp "Vision One API key: " V1_KEY && echo && curl -s -H "Authorization: Bearer $V1_KEY" https://api.eu.xdr.trendmicro.com/v3.0/containerSecurity/kubernetesClusters | python3 -m json.tool
 ```
 
 ## 6. Prove the policy reacts
 
+`podexec` rule, then a `runAsNonRoot` violation (logged now; blocked once `admission_action=block`):
+
 ```bash
-kubectl exec -n opencti deploy/opencti -- id       # triggers the "podexec" rule → event in Vision One
-kubectl run rootdemo --image=nginx -n default        # runAsNonRoot violation → logged (blocked once admission_action=block)
-kubectl delete pod rootdemo -n default
+kubectl exec -n opencti deploy/opencti -- id; kubectl run rootdemo --image=nginx -n default && sleep 20 && kubectl delete pod rootdemo -n default
 ```
 
 Events appear under Container Security → *Events* within a minute.
